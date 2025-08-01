@@ -1,8 +1,11 @@
-# LINE GPT Bot
+# LINE GPT Bot (Fixed Version)
 
-This is a simple LINE bot using ChatGPT via OpenAI API, deployed to Render.
+This is a corrected version of the LINE bot that integrates with ChatGPT via OpenAI API.
 
-## Files
-- app.js: main server file
-- package.json: dependency list
-- .gitignore: ignore sensitive files
+To deploy:
+1. Upload this ZIP to Render as a manual deploy
+2. Set environment variables:
+   - LINE_CHANNEL_ACCESS_TOKEN
+   - LINE_CHANNEL_SECRET
+   - OPENAI_API_KEY
+3. Set Webhook URL to: https://your-service-name.onrender.com/webhook

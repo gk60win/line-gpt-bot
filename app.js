@@ -1,7 +1,9 @@
 const express = require('express');
 const line = require('@line/bot-sdk');
 const axios = require('axios');
+const crypto = require('crypto');
 require('dotenv').config();
+const bodyParser = require('body-parser');
 
 const config = {
   channelAccessToken: process.env.LINE_CHANNEL_ACCESS_TOKEN,
@@ -10,11 +12,20 @@ const config = {
 
 const client = new line.Client(config);
 const app = express();
-app.use(express.json());
-app.post('/webhook', line.middleware(config), async (req, res) => {
-  Promise.all(req.body.events.map(handleEvent))
-    .then((result) => res.json(result))
-    .catch((err) => {
+
+app.post('/webhook', bodyParser.raw({ type: '*/*' }), (req, res) => {
+  const signature = req.headers['x-line-signature'];
+  const body = req.body;
+
+  if (!line.validateSignature(body, config.channelSecret, signature)) {
+    return res.status(401).send('Unauthorized');
+  }
+
+  const parsedBody = JSON.parse(body.toString());
+
+  Promise.all(parsedBody.events.map(handleEvent))
+    .then(result => res.json(result))
+    .catch(err => {
       console.error(err);
       res.status(500).end();
     });
@@ -46,7 +57,7 @@ async function handleEvent(event) {
       text: gptReply
     });
   } catch (error) {
-    console.error('Error from OpenAI:', error);
+    console.error('Error from OpenAI:', error.message);
     return client.replyMessage(event.replyToken, {
       type: 'text',
       text: 'エラーが発生しました。'
