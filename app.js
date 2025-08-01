@@ -1,50 +1,42 @@
-
-require('dotenv').config();
 const express = require('express');
 const { Client, middleware } = require('@line/bot-sdk');
 const axios = require('axios');
 
+const app = express();
+
+// 環境変数から設定を取得
 const config = {
   channelAccessToken: process.env.LINE_CHANNEL_ACCESS_TOKEN,
-  channelSecret: process.env.LINE_CHANNEL_SECRET,
+  channelSecret: process.env.LINE_CHANNEL_SECRET
 };
 
+const openaiApiKey = process.env.OPENAI_API_KEY;
 const client = new Client(config);
-const app = express();
-app.use(express.json());
-app.use(middleware(config));
 
-app.post('/webhook', async (req, res) => {
-  const events = req.body.events;
-  const results = await Promise.all(events.map(handleEvent));
-  res.json(results);
+// LINE SDK middleware（署名検証）を先に通す！ express.json()は不要
+app.post('/webhook', middleware(config), async (req, res) => {
+  try {
+    const events = req.body.events;
+    await Promise.all(events.map(handleEvent));
+    res.status(200).end();
+  } catch (err) {
+    console.error('Error in /webhook handler:', err);
+    res.status(500).end();
+  }
 });
 
+// イベントハンドラー
 async function handleEvent(event) {
-  if (event.type !== 'message' || event.message.type !== 'text') return;
+  if (event.type !== 'message' || event.message.type !== 'text') {
+    return;
+  }
 
   const userMessage = event.message.text;
-  const gptRes = await axios.post(
-    'https://api.openai.com/v1/chat/completions',
-    {
-      model: 'gpt-4o',
-      messages: [{ role: 'user', content: userMessage }],
-    },
-    {
-      headers: {
-        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-      },
-    }
-  );
 
-  const replyText = gptRes.data.choices[0].message.content;
-  return client.replyMessage(event.replyToken, {
-    type: 'text',
-    text: replyText,
-  });
-}
-
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`Server is running on port ${PORT}`);
-});
+  // ChatGPTに問い合わせ
+  try {
+    const response = await axios.post(
+      'https://api.openai.com/v1/chat/completions',
+      {
+        model: 'gpt-3.5-turbo', // または 'gpt-4'
+        messages
