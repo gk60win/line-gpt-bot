@@ -41,7 +41,16 @@ async function handleEvent(event) {
       'https://api.openai.com/v1/chat/completions',
       {
         model: 'gpt-3.5-turbo',
-        messages: [{ role: 'user', content: event.message.text }]
+        messages: [
+          {
+            role: 'system',
+            content: 'あなたは親切で知識豊富なAIアシスタントです。ユーザーの質問に簡潔に答えたあと、参考になりそうなURLを1つだけ末尾に付けてください。'
+          },
+          {
+            role: 'user',
+            content: event.message.text
+          }
+        ]
       },
       {
         headers: {
