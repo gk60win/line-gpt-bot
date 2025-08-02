@@ -31,9 +31,26 @@ app.post('/webhook', bodyParser.raw({ type: '*/*' }), (req, res) => {
     });
 });
 
+function isRelatedToITSupport(text) {
+  const keywords = [
+    "パソコン", "Wi-Fi", "インターネット", "ネットワーク", "プリンタ", "メール", "Outlook",
+    "Teams", "アカウント", "パスワード", "セキュリティ", "Zoom", "VPN", "共有フォルダ", "システム", "PC"
+  ];
+  return keywords.some(keyword => text.includes(keyword));
+}
+
 async function handleEvent(event) {
   if (event.type !== 'message' || event.message.type !== 'text') {
     return Promise.resolve(null);
+  }
+
+  const userText = event.message.text;
+
+  if (!isRelatedToITSupport(userText)) {
+    return client.replyMessage(event.replyToken, {
+      type: 'text',
+      text: '情シス業務とは異なるご質問のため、ご返答できません。ご了承ください。'
+    });
   }
 
   try {
@@ -44,11 +61,11 @@ async function handleEvent(event) {
         messages: [
           {
             role: 'system',
-            content: 'あなたは日本語で親切に答えるAIです。回答のあとに、日本国内の信頼できる情報源（例：.go.jp, .ac.jp）の実在するページURLを1つだけ添えてください。存在しないURLを生成しないよう注意してください。'
+            content: 'あなたは日本語で親切に答えるAIです。回答のあとに、日本語の一般的な参考サイト（.jp や .com などを含む）から、適切なURLを最大3つまで添えてください。'
           },
           {
             role: 'user',
-            content: event.message.text
+            content: userText
           }
         ]
       },
