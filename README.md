@@ -1,7 +1,9 @@
-# LINE GPT Bot - All Site References
+# LINE GPT Bot - Multi URL & Smartphone Support
 
-This bot responds only to IT-related questions. Non-IT queries are politely declined.
-GPT responses include a Japanese web reference, including general .jp or .com sites.
+This bot replies only to IT-related questions (including smartphone issues).
+If not related, it politely declines.
+
+OpenAI GPT is used to respond, and up to 3 Japanese reference URLs are included.
 
 ## Setup
 
@@ -10,5 +12,5 @@ GPT responses include a Japanese web reference, including general .jp or .com si
    - LINE_CHANNEL_ACCESS_TOKEN
    - LINE_CHANNEL_SECRET
    - OPENAI_API_KEY
-3. Set LINE webhook URL to:
+3. Set your LINE webhook URL to:
    https://<your-app-name>.onrender.com/webhook

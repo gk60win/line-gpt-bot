@@ -34,7 +34,9 @@ app.post('/webhook', bodyParser.raw({ type: '*/*' }), (req, res) => {
 function isRelatedToITSupport(text) {
   const keywords = [
     "パソコン", "Wi-Fi", "インターネット", "ネットワーク", "プリンタ", "メール", "Outlook",
-    "Teams", "アカウント", "パスワード", "セキュリティ", "Zoom", "VPN", "共有フォルダ", "システム", "PC"
+    "Teams", "アカウント", "パスワード", "セキュリティ", "Zoom", "VPN", "共有フォルダ",
+    "システム", "PC", "Excel", "Word", "PowerPoint", "Office", "ショートカット",
+    "アイコン", "スマホ", "スマートフォン", "iPhone", "Android", "端末", "モバイル"
   ];
   return keywords.some(keyword => text.includes(keyword));
 }
