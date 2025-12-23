@@ -1,7 +1,6 @@
 const express = require('express');
 const line = require('@line/bot-sdk');
 const axios = require('axios');
-const crypto = require('crypto');
 require('dotenv').config();
 const bodyParser = require('body-parser');
 
@@ -13,6 +12,7 @@ const config = {
 const client = new line.Client(config);
 const app = express();
 
+// LINEの署名検証のため、生のボディを扱う
 app.post('/webhook', bodyParser.raw({ type: '*/*' }), (req, res) => {
   const signature = req.headers['x-line-signature'];
   const body = req.body;
@@ -31,63 +31,160 @@ app.post('/webhook', bodyParser.raw({ type: '*/*' }), (req, res) => {
     });
 });
 
-function isRelatedToITSupport(text) {
+// テニス関連かどうか判定（テキスト用）
+function isRelatedToTennis(text) {
   const keywords = [
-    "テニス", "フォアハンド", "バックハンド", "ストローク", "ボレー", "スマッシュ", "ラケット"
+    "テニス", "フォアハンド", "バックハンド", "ストローク",
+    "ボレー", "スマッシュ", "サーブ", "ラケット",
+    "ストリング", "トップスピン", "スライス", "リターン",
+    "ダブルス", "シングルス"
   ];
   return keywords.some(keyword => text.includes(keyword));
 }
 
+// ユーザーごとの「直前のテキスト」を保存する簡易メモリ
+// key: userId / groupId / roomId
+const lastTextByUser = {};
+
+// ユーザー識別用キーを作るヘルパー
+function getUserKey(event) {
+  if (event.source.userId) return `user_${event.source.userId}`;
+  if (event.source.groupId) return `group_${event.source.groupId}`;
+  if (event.source.roomId) return `room_${event.source.roomId}`;
+  return 'unknown';
+}
+
 async function handleEvent(event) {
-  if (event.type !== 'message' || event.message.type !== 'text') {
+  if (event.type !== 'message') {
     return Promise.resolve(null);
   }
 
-  const userText = event.message.text;
+  const userKey = getUserKey(event);
 
-  if (!isRelatedToITSupport(userText)) {
-    return client.replyMessage(event.replyToken, {
-      type: 'text',
-      text: 'テニスに関する技術的な内容とは異なるご質問のため、ご返答できません。ご了承ください。'
-    });
-  }
+  // ① 動画メッセージの処理
+  if (event.message.type === 'video') {
+    const contextText = lastTextByUser[userKey] || '';
 
-  try {
-    const response = await axios.post(
-      'https://api.openai.com/v1/chat/completions',
-      {
-        model: 'gpt-3.5-turbo',
-        messages: [
-          {
-            role: 'system',
-            content: 'あなたは日本語で親切に答えるAIテニスコーチです。テニスに関する質問やお悩みに親切に解決策を返答してください。テニスの動画が送られてきたら、フォームや戦術をチェックして、アドバイスをしてください。'
-          },
-          {
-            role: 'user',
-            content: userText
+    // 直前テキストがない / テニスと関係なさそうならお断り
+    if (!contextText || !isRelatedToTennis(contextText)) {
+      return client.replyMessage(event.replyToken, {
+        type: 'text',
+        text: 'テニスに関係する動画か判定できませんでした。\n\n動画を送る前に、「フォアハンドのフォームです」「試合のリターンゲームです」など、テニスに関する簡単な説明をテキストで送ってから、もう一度動画を送ってください。'
+      });
+    }
+
+    // テニス動画っぽいと判断できた場合：
+    // ※ 実際の映像はAPIで直接解析できないため、
+    //   「このような動画が送られてきた」という説明文を元に
+    //   フォーム／戦術アドバイスを生成する。
+    try {
+      const prompt = `
+ユーザーからテニスの練習動画が送られてきました。
+実際の映像は見えませんが、動画の内容は次のテキストで説明されています：
+
+「${contextText}」
+
+この説明から想像できる範囲で構わないので、
+1. フォームの観点（準備、テイクバック、インパクト、フォロースルー、フットワークなど）
+2. 戦術の観点（球種の配分、コース選択、ポジショニングなど）
+
+について、日本語で具体的な改善アドバイスを3〜5個にまとめてください。
+各アドバイスは「見てあげるポイント → 改善方法」の順で、短い箇条書き形式でお願いします。
+      `.trim();
+
+      const response = await axios.post(
+        'https://api.openai.com/v1/chat/completions',
+        {
+          model: 'gpt-3.5-turbo',
+          messages: [
+            {
+              role: 'system',
+              content: 'あなたは日本語で親切に答えるAIテニスコーチです。フォームや戦術をわかりやすくアドバイスしてください。'
+            },
+            {
+              role: 'user',
+              content: prompt
+            }
+          ]
+        },
+        {
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${process.env.OPENAI_API_KEY}`
           }
-        ]
-      },
-      {
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${process.env.OPENAI_API_KEY}`
         }
-      }
-    );
+      );
 
-    const gptReply = response.data.choices[0].message.content.trim();
-    return client.replyMessage(event.replyToken, {
-      type: 'text',
-      text: gptReply
-    });
-  } catch (error) {
-    console.error('Error from OpenAI:', error.message);
-    return client.replyMessage(event.replyToken, {
-      type: 'text',
-      text: 'エラーが発生しました。'
-    });
+      const gptReply = response.data.choices[0].message.content.trim();
+      return client.replyMessage(event.replyToken, {
+        type: 'text',
+        text: gptReply
+      });
+    } catch (error) {
+      console.error('Error from OpenAI (video flow):', error.message);
+      return client.replyMessage(event.replyToken, {
+        type: 'text',
+        text: '動画に基づくアドバイスの生成中にエラーが発生しました。時間をおいて再度お試しください。'
+      });
+    }
   }
+
+  // ② テキストメッセージの処理
+  if (event.message.type === 'text') {
+    const userText = event.message.text || '';
+
+    // 直前テキストとして保存（次に動画が来たときの「動画の説明」として使う）
+    lastTextByUser[userKey] = userText;
+
+    // テニスに関係していないテキストはお断り
+    if (!isRelatedToTennis(userText)) {
+      return client.replyMessage(event.replyToken, {
+        type: 'text',
+        text: 'このBotはテニスに関する技術的な内容のみお答えします。\n「フォアハンドのフォームを見てほしい」「サーブのトスが安定しない」など、テニスに関する質問を送ってください。'
+      });
+    }
+
+    // テニスに関するテキスト質問 → 通常のGPT回答
+    try {
+      const response = await axios.post(
+        'https://api.openai.com/v1/chat/completions',
+        {
+          model: 'gpt-3.5-turbo',
+          messages: [
+            {
+              role: 'system',
+              content: 'あなたは日本語で親切に答えるAIテニスコーチです。テニスに関する質問やお悩みに、フォームや戦術の観点からわかりやすくアドバイスしてください。'
+            },
+            {
+              role: 'user',
+              content: userText
+            }
+          ]
+        },
+        {
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${process.env.OPENAI_API_KEY}`
+          }
+        }
+      );
+
+      const gptReply = response.data.choices[0].message.content.trim();
+      return client.replyMessage(event.replyToken, {
+        type: 'text',
+        text: gptReply
+      });
+    } catch (error) {
+      console.error('Error from OpenAI (text flow):', error.message);
+      return client.replyMessage(event.replyToken, {
+        type: 'text',
+        text: 'エラーが発生しました。時間をおいて再度お試しください。'
+      });
+    }
+  }
+
+  // それ以外のメッセージ種別（画像など）は無視
+  return Promise.resolve(null);
 }
 
 const port = process.env.PORT || 10000;
