@@ -33,10 +33,7 @@ app.post('/webhook', bodyParser.raw({ type: '*/*' }), (req, res) => {
 
 function isRelatedToITSupport(text) {
   const keywords = [
-    "パソコン", "Wi-Fi", "インターネット", "ネットワーク", "プリンタ", "メール", "Outlook",
-    "Teams", "アカウント", "パスワード", "セキュリティ", "Zoom", "VPN", "共有フォルダ",
-    "システム", "PC", "Excel", "Word", "PowerPoint", "Office", "ショートカット",
-    "アイコン", "スマホ", "スマートフォン", "iPhone", "Android", "端末", "モバイル"
+    "テニス", "フォアハンド", "バックハンド", "ストローク", "ボレー", "スマッシュ", "ラケット"
   ];
   return keywords.some(keyword => text.includes(keyword));
 }
@@ -51,7 +48,7 @@ async function handleEvent(event) {
   if (!isRelatedToITSupport(userText)) {
     return client.replyMessage(event.replyToken, {
       type: 'text',
-      text: '情シス業務とは異なるご質問のため、ご返答できません。ご了承ください。'
+      text: 'テニスに関する技術的な内容とは異なるご質問のため、ご返答できません。ご了承ください。'
     });
   }
 
@@ -63,7 +60,7 @@ async function handleEvent(event) {
         messages: [
           {
             role: 'system',
-            content: 'あなたは日本語で親切に答えるAIです。回答のあとに、日本語の一般的な参考サイト（.jp や .com などを含む）から、適切なURLを最大3つまで添えてください。'
+            content: 'あなたは日本語で親切に答えるAIテニスコーチです。テニスに関する質問やお悩みに親切に解決策を返答してください。テニスの動画が送られてきたら、フォームや戦術をチェックして、アドバイスをしてください。'
           },
           {
             role: 'user',
