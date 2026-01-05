@@ -27,9 +27,9 @@ const OPENAI_VISION_MODEL = process.env.OPENAI_VISION_MODEL || "gpt-4o-mini";
 const OPENAI_TEXT_MODEL = process.env.OPENAI_TEXT_MODEL || "gpt-4o-mini";
 
 // フレーム切り出し（軽量・安定重視）
-const FPS_FILTER = "fps=1/2,scale=512:-2";
+const FPS_FILTER = "fps=1,scale=384:-2";
 const MAX_FRAMES = 1; // 最大2枚
-const VIDEO_ANALYZE_SECONDS = 5; // ★最初の8秒だけ解析（負荷削減）
+const VIDEO_ANALYZE_SECONDS = 15; // ★最初の8秒だけ解析（負荷削減）
 
 // 一時アセット配信用（Renderでは /tmp が使える）
 const ASSETS_DIR = "/tmp/assets";
