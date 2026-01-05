@@ -29,28 +29,22 @@ const OPENAI_TEXT_MODEL = process.env.OPENAI_TEXT_MODEL || "gpt-4o-mini";
 // フレーム切り出し（軽量・安定重視）
 const FPS_FILTER = "fps=1/3,scale=640:-2"; // 3秒に1枚、横640に縮小
 const MAX_FRAMES = 2; // 最大2枚
+const VIDEO_ANALYZE_SECONDS = 8; // ★最初の8秒だけ解析（負荷削減）
 
 // 一時アセット配信用（Renderでは /tmp が使える）
 const ASSETS_DIR = "/tmp/assets";
 fs.mkdirSync(ASSETS_DIR, { recursive: true });
 
-// token -> filePath の簡易マップ（再起動で消えます）
-const assetMap = new Map();
-
-// ========= /assets 配信 =========
-app.get("/assets/:token", (req, res) => {
-  const token = req.params.token;
-  const filePath = assetMap.get(token);
-  if (!filePath || !fs.existsSync(filePath)) return res.sendStatus(404);
-  res.sendFile(filePath);
-});
-
-function publishAsset(filePath) {
-  const token = nanoid(18);
-  assetMap.set(token, filePath);
-  setTimeout(() => assetMap.delete(token), 10 * 60 * 1000); // 10分で掃除
-  return `${PUBLIC_BASE_URL}/assets/${token}`;
-}
+// ========= /assets 配信（Map廃止・静的配信） =========
+// これでプロセス再起動しても「ファイルが残っている限り」画像URLが生きる
+app.use(
+  "/assets",
+  express.static(ASSETS_DIR, {
+    setHeaders: (res) => {
+      res.setHeader("Cache-Control", "public, max-age=300");
+    },
+  })
+);
 
 // ========= 署名検証のため raw body =========
 app.post("/webhook", bodyParser.raw({ type: "*/*" }), (req, res) => {
@@ -72,7 +66,6 @@ app.post("/webhook", bodyParser.raw({ type: "*/*" }), (req, res) => {
 
 // ========= ユーザー/グループ宛先 =========
 function getTargetId(event) {
-  // pushMessage の宛先
   if (event.source.userId) return event.source.userId;
   if (event.source.groupId) return event.source.groupId;
   if (event.source.roomId) return event.source.roomId;
@@ -80,7 +73,6 @@ function getTargetId(event) {
 }
 
 function getMemoryKey(event) {
-  // 直近解析を紐づけるキー（個人優先）
   if (event.source.userId) return `user_${event.source.userId}`;
   if (event.source.groupId) return `group_${event.source.groupId}`;
   if (event.source.roomId) return `room_${event.source.roomId}`;
@@ -129,11 +121,15 @@ async function downloadLineVideo(messageId) {
   return videoPath;
 }
 
-// ========= ffmpegでフレーム切り出し =========
+// ========= ffmpegでフレーム切り出し（最初のN秒だけ） =========
 async function extractFrames(videoPath, outDir) {
   fs.mkdirSync(outDir, { recursive: true });
 
   const args = [
+    "-ss",
+    "0",
+    "-t",
+    String(VIDEO_ANALYZE_SECONDS), // ★最初のN秒に限定
     "-i",
     videoPath,
     "-vf",
@@ -157,6 +153,16 @@ async function extractFrames(videoPath, outDir) {
     .readdirSync(outDir)
     .filter((f) => f.startsWith("frame_") && f.endsWith(".jpg"))
     .map((f) => path.join(outDir, f));
+}
+
+// ★OpenAIに送る前に画像を縮小して軽くする（メモリ・速度改善）
+async function makeSmallForAI(jpgPath) {
+  const outPath = path.join("/tmp", `${nanoid(12)}_ai.jpg`);
+  await sharp(jpgPath)
+    .resize({ width: 512, withoutEnlargement: true }) // ★横512に縮小
+    .jpeg({ quality: 75 })
+    .toFile(outPath);
+  return outPath;
 }
 
 function toDataUrl(jpgPath) {
@@ -183,6 +189,9 @@ async function analyzeFrameWithOpenAI(jpgPath) {
 }
 `.trim();
 
+  // ★AIへ送る画像は縮小版
+  const smallPath = await makeSmallForAI(jpgPath);
+
   const resp = await axios.post(
     "https://api.openai.com/v1/chat/completions",
     {
@@ -192,7 +201,7 @@ async function analyzeFrameWithOpenAI(jpgPath) {
           role: "user",
           content: [
             { type: "text", text: prompt },
-            { type: "image_url", image_url: { url: toDataUrl(jpgPath) } },
+            { type: "image_url", image_url: { url: toDataUrl(smallPath) } },
           ],
         },
       ],
@@ -207,8 +216,12 @@ async function analyzeFrameWithOpenAI(jpgPath) {
     }
   );
 
+  // 使い終わった縮小ファイルは削除（/tmp肥大化防止）
+  try {
+    fs.unlinkSync(smallPath);
+  } catch {}
+
   const content = resp.data?.choices?.[0]?.message?.content || "";
-  // JSONのみ期待だが、保険で抽出
   const jsonText = content.match(/\{[\s\S]*\}/)?.[0] || "";
   return JSON.parse(jsonText);
 }
@@ -246,7 +259,13 @@ async function drawMarks(jpgPath, marks) {
   `);
 
   const outPath = path.join(ASSETS_DIR, `${nanoid(16)}.jpg`);
-  await img.composite([{ input: svg, top: 0, left: 0 }]).jpeg({ quality: 85 }).toFile(outPath);
+
+  // ★画像を少し縮小して軽量化（LINE取得・メモリ負荷改善）
+  await img
+    .resize({ width: 960, withoutEnlargement: true })
+    .composite([{ input: svg, top: 0, left: 0 }])
+    .jpeg({ quality: 78 })
+    .toFile(outPath);
 
   return { outPath, picked };
 }
@@ -293,10 +312,11 @@ async function processVideoAndPush(event) {
     }
 
     const { outPath, picked } = await drawMarks(frames[0], analysis.marks || []);
-    const imgUrl = publishAsset(outPath);
+
+    // ★ファイル名でURL生成（Map不要）
+    const imgUrl = `${PUBLIC_BASE_URL}/assets/${path.basename(outPath)}`;
     const tipsText = buildTipsText(picked);
 
-    // メモリ保存（後続のテキスト質問に利用）
     lastAnalysisByKey[memoryKey] = {
       at: Date.now(),
       shot_type: analysis.shot_type || "unknown",
@@ -304,7 +324,6 @@ async function processVideoAndPush(event) {
       tipsText,
     };
 
-    // 画像＋テキストを push
     await client.pushMessage(targetId, [
       { type: "image", originalContentUrl: imgUrl, previewImageUrl: imgUrl },
       {
@@ -322,7 +341,6 @@ async function processVideoAndPush(event) {
       console.error("HTTP data:", JSON.stringify(error.response.data));
     }
 
-    // pushでエラー通知（replyTokenは使わない）
     const targetId = getTargetId(event);
     if (targetId) {
       await client.pushMessage(targetId, {
@@ -339,13 +357,11 @@ async function handleEvent(event) {
 
   // --- 動画が来たら：即返信（replyMessage）→解析はpushで返す ---
   if (event.message.type === "video") {
-    // ここは軽くしてreplyTokenを確実に使う
     await client.replyMessage(event.replyToken, {
       type: "text",
       text: "動画を受け取りました。解析中です（30秒ほど）🎾",
     });
 
-    // 重い処理は非同期で回す（pushで結果送信）
     processVideoAndPush(event);
     return null;
   }
@@ -415,7 +431,6 @@ ${last.tipsText}
     }
   }
 
-  // その他は案内
   return client.replyMessage(event.replyToken, {
     type: "text",
     text: "テニスの動画（mp4）を送ってください。フレームにマークを付けて改善点を返します。",
