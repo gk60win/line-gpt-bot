@@ -12,7 +12,16 @@ const config = {
 const client = new line.Client(config);
 const app = express();
 
-// LINE Webhook（署名検証のため raw で受ける）
+// =====================
+// 設定
+// =====================
+const MODEL = process.env.OPENAI_MODEL || 'gpt-3.5-turbo';
+// 「直近動画」とみなす時間（例：2時間）
+const LAST_VIDEO_TTL_MS = 2 * 60 * 60 * 1000;
+
+// =====================
+// 署名検証のため raw ボディで受ける
+// =====================
 app.post('/webhook', bodyParser.raw({ type: '*/*' }), (req, res) => {
   const signature = req.headers['x-line-signature'];
   const body = req.body;
@@ -31,18 +40,29 @@ app.post('/webhook', bodyParser.raw({ type: '*/*' }), (req, res) => {
     });
 });
 
-// テニス関連かどうか（テキスト用の簡易判定）
+// =====================
+// テニス関連判定（ざっくり）
+// =====================
 function isRelatedToTennis(text) {
+  if (!text) return false;
   const keywords = [
-    "テニス", "フォアハンド", "バックハンド", "ストローク",
-    "ボレー", "スマッシュ", "サーブ", "ラケット",
-    "ストリング", "ガット", "トップスピン", "スライス",
-    "リターン", "ダブルス", "シングルス"
+    "テニス", "フォア", "フォアハンド", "バック", "バックハンド", "ストローク",
+    "ボレー", "スマッシュ", "サーブ", "リターン", "ラケット", "ガット", "ストリング",
+    "トップスピン", "スライス", "ドロップ", "ロブ", "ダブルス", "シングルス",
+    "サービス", "ファースト", "セカンド", "トス", "回転", "コース", "戦術", "配球"
   ];
-  return keywords.some(keyword => text.includes(keyword));
+  return keywords.some(k => text.includes(k));
 }
 
+// 「動画について質問してる」っぽい文言
+function refersToVideo(text) {
+  if (!text) return false;
+  return /動画|ビデオ|さっき|前の|アップした|送った/.test(text);
+}
+
+// =====================
 // ユーザー識別キー
+// =====================
 function getUserKey(event) {
   if (event.source.userId) return `user_${event.source.userId}`;
   if (event.source.groupId) return `group_${event.source.groupId}`;
@@ -50,11 +70,94 @@ function getUserKey(event) {
   return 'unknown';
 }
 
-// 「直前に動画を送ったかどうか」を覚える簡易フラグ
-const lastVideoFlagByUser = {};
-// （必要なら直前テキストも持てるようにしておく）
+// =====================
+// メモリ（Render再起動で消えます。永続化したいならDBへ）
+// =====================
+/**
+ * lastVideoByUser[userKey] = {
+ *   messageId: string,
+ *   receivedAt: number,
+ *   lastAdviceText: string | null
+ * }
+ */
+const lastVideoByUser = {};
 const lastTextByUser = {};
 
+// =====================
+// OpenAI 呼び出し（Chat Completions）
+// =====================
+async function askCoach(messages) {
+  const response = await axios.post(
+    'https://api.openai.com/v1/chat/completions',
+    { model: MODEL, messages },
+    {
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`
+      }
+    }
+  );
+  return response.data.choices[0].message.content.trim();
+}
+
+// =====================
+// 動画を受け取った直後に返す “即アドバイス”
+// =====================
+async function makeInstantAdvice() {
+  // 動画内容が分からなくても「まず返す」ための汎用アドバイス
+  const prompt = `
+ユーザーがテニスの動画（フォーム確認用）をアップしました。
+あなたは日本語のAIテニスコーチです。
+
+要件：
+- すぐに役立つ「チェックポイント→直し方」を 5個、箇条書きで出す
+- サーブ/ストローク/ボレーなど種類が不明なので、共通の重要点（準備・打点・体重移動・脱力・フットワーク等）を中心に
+- 最後に「動画は サーブ/フォア/バック/ボレー/試合 のどれですか？」のように、種類を1問だけ聞く（短く）
+- 「見れない」「確認できない」などの断り文句は書かない
+`.trim();
+
+  return askCoach([
+    {
+      role: 'system',
+      content:
+        'あなたは日本語で親切に答えるAIテニスコーチです。短く具体的に。断り文句は禁止。'
+    },
+    { role: 'user', content: prompt }
+  ]);
+}
+
+// =====================
+// 動画に紐づけて再アドバイス（テキスト質問が来たとき）
+// =====================
+async function makeFollowupAdvice({ userQuestion, lastAdviceText }) {
+  const prompt = `
+ユーザーは直前にテニスのフォーム動画をアップし、その後に質問しています。
+
+直前にあなたが返した初回アドバイス（参考）：
+${lastAdviceText ? `「${lastAdviceText}」` : '（初回アドバイスは未保存）'}
+
+ユーザーの質問：
+「${userQuestion}」
+
+あなたは「その動画を見たコーチ」という前提で、質問に答えつつ、必要なら補足の改善案を 3〜5個、箇条書きで提示してください。
+- 断り文句（見れない/確認できない等）は禁止
+- 具体的な練習ドリル（例：トス位置固定、影打ち、球出しの回数/意識）も1〜2個入れる
+- 最後に追加で確認したいことがあれば、短い質問を最大2つまで
+`.trim();
+
+  return askCoach([
+    {
+      role: 'system',
+      content:
+        'あなたは日本語で親切に答えるAIテニスコーチです。短く具体的に。断り文句は禁止。'
+    },
+    { role: 'user', content: prompt }
+  ]);
+}
+
+// =====================
+// メインハンドラ
+// =====================
 async function handleEvent(event) {
   if (event.type !== 'message') {
     return Promise.resolve(null);
@@ -62,110 +165,100 @@ async function handleEvent(event) {
 
   const userKey = getUserKey(event);
 
-  // ① 動画メッセージが来たとき
+  // ---- 動画が来たら「すぐ返す」 ----
   if (event.message.type === 'video') {
-    // 「直前に動画を送った」というフラグだけ立てておく
-    lastVideoFlagByUser[userKey] = true;
+    // 受信した動画を記憶
+    lastVideoByUser[userKey] = {
+      messageId: event.message.id,
+      receivedAt: Date.now(),
+      lastAdviceText: null
+    };
 
-    return client.replyMessage(event.replyToken, {
-      type: 'text',
-      text:
-        'サーブ（またはショット）の動画ありがとうございます！\n\n' +
-        'このあと、テキストで「さっきアップしたサーブの動画から、だめな点を教えて」などのように、' +
-        '悩みや見てほしいポイントを送ってください。'
-    });
+    try {
+      const advice = await makeInstantAdvice();
+
+      // 初回アドバイスを保存（後続の質問で参照）
+      lastVideoByUser[userKey].lastAdviceText = advice;
+
+      return client.replyMessage(event.replyToken, {
+        type: 'text',
+        text: advice
+      });
+    } catch (error) {
+      console.error('Error from OpenAI (instant video advice):', error.message);
+      return client.replyMessage(event.replyToken, {
+        type: 'text',
+        text: '動画の解析中にエラーが発生しました。時間をおいて再度お試しください。'
+      });
+    }
   }
 
-  // ② テキストメッセージの場合
+  // ---- テキストが来たら ----
   if (event.message.type === 'text') {
     const userText = event.message.text || '';
     lastTextByUser[userKey] = userText;
 
-    const hasRecentVideo = !!lastVideoFlagByUser[userKey];
-    const refersToVideo = /動画|ビデオ|さっきアップした|さっき送った/.test(userText);
+    const tennis = isRelatedToTennis(userText);
+    const videoRef = refersToVideo(userText);
 
-    // テニス関連か、または「動画に関するテニスの質問」とみなせるか
-    const relatedToTennis =
-      isRelatedToTennis(userText) || (hasRecentVideo && refersToVideo);
+    // 直近動画があるか（TTL内）
+    const lastVideo = lastVideoByUser[userKey];
+    const hasFreshVideo =
+      lastVideo && (Date.now() - lastVideo.receivedAt) <= LAST_VIDEO_TTL_MS;
 
-    if (!relatedToTennis) {
+    // テニス以外はお断り（要件どおり）
+    // ※「さっきの動画〜」でも、テニス単語が一切ないと誤判定するので、
+    //    “直近動画があり、動画参照っぽい”ならテニス扱いにする
+    const treatAsTennis = tennis || (hasFreshVideo && videoRef);
+
+    if (!treatAsTennis) {
       return client.replyMessage(event.replyToken, {
         type: 'text',
-        text:
-          'このBotはテニスに関する技術的な内容をサポートする専用です。\n' +
-          '「サーブのフォームを見てほしい」「フォアハンドの安定感を上げたい」など、' +
-          'テニスに関する質問や、さっき送ったテニス動画について質問してください。'
+        text: 'テニスに関係ない内容のため、返答できません。テニスのフォームや戦術に関する質問を送ってください。'
       });
     }
 
-    // 直前に動画があり、かつ動画を参照しているテキスト => 「動画を見た前提」でアドバイス
-    const isQuestionFromVideo = hasRecentVideo && refersToVideo;
+    // 直近動画があるなら「動画前提で再アドバイス」
+    if (hasFreshVideo) {
+      try {
+        const followup = await makeFollowupAdvice({
+          userQuestion: userText,
+          lastAdviceText: lastVideo.lastAdviceText
+        });
 
-    // ここで使うプロンプトを組み立て
-    let userPrompt;
+        // 追記アドバイスも保存しておく（次の質問で参照）
+        lastVideoByUser[userKey].lastAdviceText = followup;
 
-    if (isQuestionFromVideo) {
-      userPrompt = `
-ユーザーは直前にテニスの練習動画（特にサーブなど）をアップロードしたあと、次のように質問しています：
-
-「${userText}」
-
-あなたはその動画を見たテニスコーチである前提で、
-1. フォーム（トス、構え、テイクバック、インパクト、フォロースルー、フットワークなど）
-2. 戦術（コース選択、スピードと回転の配分、ポジショニングなど）
-
-の観点から、問題になりやすいポイントと改善方法を、3〜5個ほど箇条書きで日本語でアドバイスしてください。
-
-実際に動画は見えていなくても構いません。一般的によくあるミスやチェックポイントを踏まえて、
-「ここをこうすると良い」という形で、できるだけ具体的にアドバイスしてください。
-      `.trim();
-
-      // 一度使ったらフラグを落としておく（古い動画にいつまでも引きずられないように）
-      lastVideoFlagByUser[userKey] = false;
-    } else {
-      // 通常のテニス質問として扱う
-      userPrompt = userText;
+        return client.replyMessage(event.replyToken, {
+          type: 'text',
+          text: followup
+        });
+      } catch (error) {
+        console.error('Error from OpenAI (followup):', error.message);
+        return client.replyMessage(event.replyToken, {
+          type: 'text',
+          text: 'アドバイス生成中にエラーが発生しました。時間をおいて再度お試しください。'
+        });
+      }
     }
 
+    // 直近動画がない場合は「通常のテニス質問」として回答
     try {
-      const response = await axios.post(
-        'https://api.openai.com/v1/chat/completions',
+      const reply = await askCoach([
         {
-          model: 'gpt-3.5-turbo',
-          messages: [
-            {
-              role: 'system',
-              content:
-                'あなたは日本語で親切に答えるAIテニスコーチです。' +
-                'フォームや戦術、メンタル、練習方法などについて、分かりやすく具体的にアドバイスしてください。\n' +
-                'ユーザーが「さっきアップしたサーブの動画から、だめな点を教えて」など、' +
-                '動画に言及した場合でも、動画を直接見られないからといって断らないでください。\n' +
-                '動画は見えていない前提でも、一般的なサーブ・ストロークのチェックポイントや、' +
-                'よくあるミスを想定しながら、改善方法を提案してください。\n' +
-                '「動画を確認できない」「動画を見ることはできません」といった断り文句は使わず、' +
-                '代わりに「チェックすべきポイント」と「どう直すか」を必ず提示してください。'
-            },
-            {
-              role: 'user',
-              content: userPrompt
-            }
-          ]
+          role: 'system',
+          content:
+            'あなたは日本語で親切に答えるAIテニスコーチです。短く具体的に。断り文句は禁止。'
         },
-        {
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${process.env.OPENAI_API_KEY}`
-          }
-        }
-      );
+        { role: 'user', content: userText }
+      ]);
 
-      const gptReply = response.data.choices[0].message.content.trim();
       return client.replyMessage(event.replyToken, {
         type: 'text',
-        text: gptReply
+        text: reply
       });
     } catch (error) {
-      console.error('Error from OpenAI:', error.message);
+      console.error('Error from OpenAI (text):', error.message);
       return client.replyMessage(event.replyToken, {
         type: 'text',
         text: 'エラーが発生しました。時間をおいて再度お試しください。'
@@ -173,7 +266,7 @@ async function handleEvent(event) {
     }
   }
 
-  // 画像などその他のタイプはとりあえず無視
+  // それ以外のメッセージ（画像など）
   return Promise.resolve(null);
 }
 
