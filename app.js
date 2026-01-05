@@ -138,7 +138,7 @@ async function downloadLineVideo(messageId) {
 async function extractKeyFrames(videoPath, outDir) {
   fs.mkdirSync(outDir, { recursive: true });
 
-  const stamps = ["1.2", "2.8"];
+  const stamps = ["5", "8"];
   const outputs = [];
 
   for (let i = 0; i < stamps.length; i++) {
