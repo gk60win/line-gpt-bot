@@ -28,7 +28,7 @@ const OPENAI_TEXT_MODEL = process.env.OPENAI_TEXT_MODEL || "gpt-4o-mini";
 
 // フレーム切り出し（軽量・安定重視）
 const FPS_FILTER = "fps=1,scale=384:-2";
-const MAX_FRAMES = 1; // 最大2枚
+const MAX_FRAMES = 2; // 最大2枚
 const VIDEO_ANALYZE_SECONDS = 15; // ★最初の8秒だけ解析（負荷削減）
 
 // 一時アセット配信用（Renderでは /tmp が使える）
